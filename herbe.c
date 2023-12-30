@@ -7,7 +7,10 @@
 #include <string.h>
 #include <stdarg.h>
 #include <fcntl.h>
-#include <semaphore.h>
+
+#ifdef XINERAMA
+#include <X11/extensions/Xinerama.h>
+#endif
 
 #include "config.h"
 
@@ -15,9 +18,17 @@
 #define EXIT_FAIL 1
 #define EXIT_DISMISS 2
 
+#define MAX(A, B)               ((A) > (B) ? (A) : (B))
+#define MIN(A, B)               ((A) < (B) ? (A) : (B))
+#define INTERSECT(x,y,w,h,r)  (MAX(0, MIN((x)+(w),(r).x_org+(r).width)  - MAX((x),(r).x_org)) \
+                             * MAX(0, MIN((y)+(h),(r).y_org+(r).height) - MAX((y),(r).y_org)))
+
 Display *display;
 Window window;
 int exit_code = EXIT_DISMISS;
+
+int center = 0;
+static int mw, mh; /* Monitor width and height */
 
 static void die(const char *format, ...)
 {
@@ -27,6 +38,11 @@ static void die(const char *format, ...)
 	fprintf(stderr, "\n");
 	va_end(ap);
 	exit(EXIT_FAIL);
+}
+
+static void usage(void)
+{
+	die("Usage: herbe [-c] [-d duration] message");
 }
 
 int get_max_len(char *string, XftFont *font, int max_text_width)
@@ -84,11 +100,24 @@ void expire(int sig)
 
 int main(int argc, char *argv[])
 {
+	int j;
+	for (j = 1; j < argc; j++)
+	    if (!strcmp(argv[j], "-c"))
+		center = 1;
+	    else if (!strcmp(argv[j], "-d") && j + 1 < argc)
+		duration = atoi(argv[++j]); /* 0 for invalid input */
+	    else
+	    {
+		j--;
+		break;
+	    }
+
+	argv += j;
+	argc -= j;
+
 	if (argc == 1)
-	{
-		sem_unlink("/herbe");
-		die("Usage: %s body", argv[0]);
-	}
+		usage();
+
 
 	struct sigaction act_expire, act_ignore;
 
@@ -111,6 +140,7 @@ int main(int argc, char *argv[])
 		die("Cannot open display");
 
 	int screen = DefaultScreen(display);
+	window = RootWindow(display, screen);
 	Visual *visual = DefaultVisual(display, screen);
 	Colormap colormap = DefaultColormap(display, screen);
 
@@ -154,16 +184,54 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	unsigned int x = pos_x;
-	unsigned int y = pos_y;
 	unsigned int text_height = font->ascent - font->descent;
 	unsigned int height = (num_of_lines - 1) * line_spacing + num_of_lines * text_height + 2 * padding;
 
-	if (corner == TOP_RIGHT || corner == BOTTOM_RIGHT)
-		x = screen_width - width - border_size * 2 - pos_x;
+	int x,y;
+	if (center)
+	{
+	    int di, x_offset, y_offset;
+	    unsigned int du;
+	    Window dw;
 
-	if (corner == BOTTOM_LEFT || corner == BOTTOM_RIGHT)
-		y = screen_height - height - border_size * 2 - pos_y;
+	    if (!XQueryPointer(display, window, &dw, &dw, &x, &y, &di, &di, &du))
+		  die("Could not query pointer position");
+#ifdef XINERAMA
+	    XineramaScreenInfo *info;
+	    int n;
+
+	    if ((info = XineramaQueryScreens(display, &n))){
+		  for (j = 0; j < n; j++)
+			  if (INTERSECT(x, y, 1, 1, info[j]) != 0)
+				  break;
+
+	      x_offset = info[j].x_org;
+	      y_offset = info[j].y_org;
+	      mh = info[j].height;
+	      mw = info[j].width;
+	      XFree(info);
+	    } else
+#endif
+	    {
+	      x_offset = 0;
+	      y_offset = 0;
+	      mw = screen_width;
+	      mh = screen_height;
+	    }
+
+	    x = x_offset + (mw - width) / 2;
+	    y = y_offset + (mh - height) / 2;
+	}
+	else
+	{
+	    x = pos_x;
+	    y = pos_y;
+	    if (corner == TOP_RIGHT || corner == BOTTOM_RIGHT)
+		    x = screen_width - width - border_size * 2 - pos_x;
+
+	    if (corner == BOTTOM_LEFT || corner == BOTTOM_RIGHT)
+		    y = screen_height - height - border_size * 2 - pos_y;
+	}
 
 	window = XCreateWindow(display, RootWindow(display, screen), x, y, width, height, border_size, DefaultDepth(display, screen),
 						   CopyFromParent, visual, CWOverrideRedirect | CWBackPixel | CWBorderPixel, &attributes);
@@ -174,8 +242,8 @@ int main(int argc, char *argv[])
 	XSelectInput(display, window, ExposureMask | ButtonPress);
 	XMapWindow(display, window);
 
-	sem_t *mutex = sem_open("/herbe", O_CREAT, 0644, 1);
-	sem_wait(mutex);
+	/* sem_t *mutex = sem_open("/herbe", O_CREAT, 0644, 1); */
+	/* sem_wait(mutex); */
 
 	sigaction(SIGUSR1, &act_expire, 0);
 	sigaction(SIGUSR2, &act_expire, 0);
@@ -206,9 +274,6 @@ int main(int argc, char *argv[])
 			}
 		}
 	}
-
-	sem_post(mutex);
-	sem_close(mutex);
 
 	for (int i = 0; i < num_of_lines; i++)
 		free(lines[i]);
